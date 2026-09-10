@@ -217,8 +217,12 @@
       if (r.status === 401) { location.href = "/login"; return; }
       if (!r.ok) throw new Error("server said " + r.status);
       const j = await r.json();
-      statusEl.textContent = "Saved ✓" + (j.meta && j.meta.published_to ? " (also copied out)" : "");
-      setTimeout(() => { discard(); statusEl.textContent = ""; }, 1400);
+      const lec = j.meta && j.meta.lecture;
+      let extra = "";
+      if (lec && lec.sent) extra = " · sent to lecture notes (" + lec.course + ")";
+      else if (j.meta && j.meta.published_to) extra = " (also copied out)";
+      statusEl.textContent = "Saved ✓" + extra;
+      setTimeout(() => { discard(); statusEl.textContent = ""; }, 1800);
     } catch (e) {
       statusEl.textContent =
         "Upload failed — you're still holding the recording. Tap Save to retry.";

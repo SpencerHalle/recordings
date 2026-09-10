@@ -4,9 +4,16 @@ One container (`recordings`) on bigbox. Records come in from the browser's
 MediaRecorder, land under $REC_DATA/recordings/<id>/, and — if $REC_PUBLISH_DIR
 is set — a copy is dropped there too so another system (e.g. Audiobookshelf)
 can pick them up.
+
+If $REC_LECTURE_WEBDAV is set, a recording whose start time falls inside a
+scheduled class window is also pushed into the Nextcloud folder that the
+lecture-transcription pipeline (on the Pi) watches — named `YYYYMMDD_HHMMSS.<ext>`
+so that pipeline can match it to the right course. See the `lecture pipeline
+hand-off` section below.
 """
 from __future__ import annotations
 
+import base64
 import hashlib
 import hmac
 import json
@@ -16,7 +23,9 @@ import re
 import secrets as pysecrets
 import shutil
 import time
-from datetime import datetime, timezone
+import urllib.error
+import urllib.request
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from zoneinfo import ZoneInfo
 
@@ -45,6 +54,132 @@ TZ = ZoneInfo(os.environ.get("TZ", "America/Denver"))
 
 # Optional: also copy every finished recording into this directory.
 PUBLISH_DIR = os.environ.get("REC_PUBLISH_DIR", "").strip()
+
+# ── lecture pipeline hand-off ──────────────────────────────────────
+# When configured, a recording made during a scheduled class is uploaded to the
+# Nextcloud folder the lecture pipeline (testserver:~/.openclaw/workspace/
+# lecture-pipeline) polls. The pipeline classifies by the *filename timestamp*
+# (recording start time) against its own copy of the class schedule, so the
+# schedule below must stay in step with that pipeline's config.yaml.
+_WEEKDAYS = {"mon": 0, "tue": 1, "wed": 2, "thu": 3,
+             "fri": 4, "sat": 5, "sun": 6}
+_DEFAULT_SCHEDULE = [
+    {"course": "astro", "days": ["Mon"], "start": "16:45", "end": "19:15"},
+    {"course": "na", "days": ["Tue", "Thu"], "start": "10:50", "end": "12:05"},
+]
+
+
+def _load_lecture_config():
+    webdav = os.environ.get("REC_LECTURE_WEBDAV", "").strip().rstrip("/")
+    pw_file = os.environ.get("REC_LECTURE_PASSWORD_FILE",
+                             str(SECRETS / "nextcloud_app_password"))
+    pw = ""
+    try:
+        if pw_file and Path(pw_file).exists():
+            pw = Path(pw_file).read_text().strip()
+    except OSError:
+        pw = ""
+    pw = pw or os.environ.get("REC_LECTURE_PASSWORD", "").strip()
+    if not webdav or not pw:
+        return None
+    raw = os.environ.get("REC_LECTURE_SCHEDULE", "").strip()
+    try:
+        schedule = json.loads(raw) if raw else _DEFAULT_SCHEDULE
+    except json.JSONDecodeError:
+        log.error("REC_LECTURE_SCHEDULE is not valid JSON — using the default")
+        schedule = _DEFAULT_SCHEDULE
+    try:
+        slack = int(os.environ.get("REC_LECTURE_SLACK_MIN", "20"))
+    except ValueError:
+        slack = 20
+    return {
+        "webdav": webdav,
+        "host": os.environ.get("REC_LECTURE_HOST", "").strip(),
+        "user": os.environ.get("REC_LECTURE_USER", "Spencer").strip(),
+        "password": pw,
+        "folder": "/" + os.environ.get("REC_LECTURE_FOLDER",
+                                       "/LectureRecordings").strip("/"),
+        "schedule": schedule,
+        "slack": slack,
+    }
+
+
+LECTURE = _load_lecture_config()
+if LECTURE:
+    log.info("lecture pipeline hand-off enabled: %s%s (%d class slots, ±%dm)",
+             LECTURE["webdav"], LECTURE["folder"],
+             len(LECTURE["schedule"]), LECTURE["slack"])
+
+
+def _lecture_course(start: datetime) -> str | None:
+    """Course code whose scheduled slot contains `start` (± slack), else None."""
+    if not LECTURE:
+        return None
+    slack = timedelta(minutes=LECTURE["slack"])
+    for slot in LECTURE["schedule"]:
+        try:
+            days = {_WEEKDAYS[d[:3].lower()] for d in slot["days"]}
+            sh, sm = (int(x) for x in str(slot["start"]).split(":"))
+            eh, em = (int(x) for x in str(slot["end"]).split(":"))
+        except (KeyError, ValueError, TypeError):
+            continue
+        if start.weekday() not in days:
+            continue
+        s = start.replace(hour=sh, minute=sm, second=0, microsecond=0)
+        e = start.replace(hour=eh, minute=em, second=0, microsecond=0)
+        if s - slack <= start <= e + slack:
+            return slot["course"]
+    return None
+
+
+def _push_to_lecture_pipeline(rid: str, meta: dict) -> dict | None:
+    """If this recording was made during a class, PUT its audio into the
+    Nextcloud folder the lecture pipeline watches. Returns a status dict to
+    store on the recording (meta['lecture']), or None if the feature is off."""
+    if not LECTURE:
+        return None
+    created = datetime.fromtimestamp(meta["created_epoch"], TZ)
+    start = created - timedelta(seconds=float(meta.get("duration") or 0))
+    course = _lecture_course(start)
+    if not course:
+        log.info("%s: started %s — no class then, not sent to lecture pipeline",
+                 rid, start.strftime("%a %Y-%m-%d %H:%M"))
+        return {"sent": False, "reason": "no class scheduled then",
+                "start": start.isoformat()}
+
+    remote_name = start.strftime("%Y%m%d_%H%M%S") + "." + meta["ext"]
+    url = f"{LECTURE['webdav']}{LECTURE['folder']}/{remote_name}"
+    try:
+        body = (REC_DIR / rid / f"audio.{meta['ext']}").read_bytes()
+    except OSError as e:
+        return {"sent": False, "course": course, "remote": remote_name,
+                "reason": f"cannot read audio: {e}"}
+    req = urllib.request.Request(url, data=body, method="PUT")
+    req.add_header("Authorization", "Basic " + base64.b64encode(
+        f"{LECTURE['user']}:{LECTURE['password']}".encode()).decode())
+    if LECTURE["host"]:
+        req.add_header("Host", LECTURE["host"])
+    req.add_header("Content-Type",
+                   meta.get("mime") or "application/octet-stream")
+    try:
+        code = urllib.request.urlopen(req, timeout=60).status
+    except urllib.error.HTTPError as e:
+        code = e.code
+    except Exception as e:  # noqa: BLE001 — network is best-effort here
+        log.error("%s: lecture pipeline PUT failed: %r", rid, e)
+        return {"sent": False, "course": course, "remote": remote_name,
+                "reason": str(e), "at": datetime.now(TZ).isoformat()}
+
+    result = {"sent": code in (200, 201, 204), "course": course,
+              "remote": remote_name, "status": code,
+              "at": datetime.now(TZ).isoformat()}
+    if result["sent"]:
+        log.info("%s -> lecture pipeline as %s (course %s)",
+                 rid, remote_name, course)
+    else:
+        result["reason"] = f"WebDAV PUT returned {code}"
+        log.error("%s: lecture pipeline PUT returned %s", rid, code)
+    return result
 
 # ── auth ───────────────────────────────────────────────────────────
 # Single shared password. Read from secrets/app_password, or $REC_PASSWORD.
@@ -112,7 +247,16 @@ async def _redirecting_errors(request: Request, exc: HTTPException):
 
 @app.get("/healthz", include_in_schema=False)
 def healthz():
-    return {"ok": True, "publish_dir": PUBLISH_DIR or None}
+    return {
+        "ok": True,
+        "publish_dir": PUBLISH_DIR or None,
+        "lecture": {
+            "enabled": bool(LECTURE),
+            "folder": LECTURE["folder"] if LECTURE else None,
+            "courses": sorted({s["course"] for s in LECTURE["schedule"]})
+            if LECTURE else [],
+        },
+    }
 
 
 # ── PWA plumbing ───────────────────────────────────────────────────
@@ -253,6 +397,9 @@ async def upload(
     published = _publish(rid, meta)
     if published:
         meta["published_to"] = published
+    lecture = _push_to_lecture_pipeline(rid, meta)
+    if lecture is not None:
+        meta["lecture"] = lecture
     (folder / "meta.json").write_text(json.dumps(meta, indent=2))
     log.info("saved %s (%s, %.1fs, %d bytes)%s", rid, ext, meta["duration"],
              len(data), " -> " + published if published else "")
@@ -267,7 +414,8 @@ def list_recordings(_: None = Depends(require_auth)):
             m = _load(d.name)
             if m:
                 out.append(m)
-    return {"recordings": out, "publish_dir": PUBLISH_DIR or None}
+    return {"recordings": out, "publish_dir": PUBLISH_DIR or None,
+            "lecture_enabled": bool(LECTURE)}
 
 
 @app.patch("/api/recordings/{rid}")
@@ -282,6 +430,20 @@ async def rename_recording(rid: str, request: Request, _: None = Depends(require
         m["note"] = (body["note"] or "").strip()
     (_meta_path(rid)).write_text(json.dumps(m, indent=2))
     return {"ok": True, "meta": m}
+
+
+@app.post("/api/recordings/{rid}/lecture-push")
+def resend_to_lecture_pipeline(rid: str, _: None = Depends(require_auth)):
+    """Re-attempt the lecture-pipeline hand-off for one recording."""
+    if not LECTURE:
+        raise HTTPException(400, "lecture pipeline hand-off is not configured")
+    m = _load(rid)
+    if not m:
+        raise HTTPException(404, "not found")
+    result = _push_to_lecture_pipeline(rid, m)
+    m["lecture"] = result
+    _meta_path(rid).write_text(json.dumps(m, indent=2))
+    return {"ok": bool(result and result.get("sent")), "lecture": result}
 
 
 @app.delete("/api/recordings/{rid}")

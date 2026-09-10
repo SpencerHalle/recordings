@@ -23,7 +23,8 @@ Runs as one container (`recordings`) on bigbox, behind Caddy on
 ## Where recordings go
 
 By default they only live in `data/recordings/` and are browsable at
-`/library` (play, rename, download, delete).
+`/library` (play, rename, download, delete). Lecture recordings are also handed
+to the transcription pipeline — see below.
 
 To **also** copy each finished recording somewhere else (e.g. into an
 Audiobookshelf library folder), set `REC_PUBLISH_DIR` to a path that is also
@@ -41,6 +42,27 @@ systemctl --user daemon-reload && systemctl --user restart recordings
 ```
 
 Copies are named `<id>__<title>.<ext>`.
+
+## Lecture pipeline hand-off
+
+If a recording's **start time** falls inside a scheduled class, the app also
+uploads it to the Nextcloud folder that the lecture-transcription pipeline
+(`testserver:~/.openclaw/workspace/lecture-pipeline`) polls — named
+`YYYYMMDD_HHMMSS.<ext>` so that pipeline can match it to the right course. From
+there transcription + LaTeX note generation happen automatically; nothing to do
+after class.
+
+- Enabled by the `REC_LECTURE_*` vars in `recordings.container`. It talks to the
+  Nextcloud container directly over `nextcloud.network` (no Cloudflare), sending
+  `Host: nextcloud.halleserver.cc`.
+- Auth: `secrets/nextcloud_app_password` (a Nextcloud app password for `Spencer`,
+  minted with `occ user:add-app-password Spencer --name=recordings-app`).
+- The class schedule is the built-in default (astro Mon 16:45–19:15, na Tue/Thu
+  10:50–12:05, ±20 min). **It must match the pipeline's `config.yaml` `schedule:`** —
+  override here with `REC_LECTURE_SCHEDULE` (JSON) if that ever drifts.
+- Library shows `lecture → <course>` on recordings that were sent; a failed push
+  gets a **Resend to notes** button. `curl localhost:8099/healthz` reports status.
+- Recordings made outside any class window are kept locally but not sent.
 
 ## Setup / rebuild
 

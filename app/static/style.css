@@ -104,5 +104,11 @@ button.danger, .btn.danger { color: #ff8a82; border-color: #4a2b2b; }
 .rec-title.ok { border-color: var(--ok); }
 .rec-note { font-size: 13px; color: var(--text); opacity: .85; margin: 6px 0; white-space: pre-wrap; }
 .rec audio { width: 100%; margin-top: 10px; height: 38px; }
+.tag {
+  display: inline-block; padding: 1px 7px; border-radius: 999px;
+  background: #12312a; color: var(--ok); border: 1px solid #1c4a3f;
+  font-size: 11px; white-space: nowrap;
+}
+.tag.warn { background: #3a2020; color: #ff8a82; border-color: #4a2b2b; }
 .rec-actions { display: flex; flex-direction: column; gap: 8px; flex: 0 0 auto; }
 .rec-actions .btn { text-align: center; text-decoration: none; font-size: 13px; padding: 8px 12px; }

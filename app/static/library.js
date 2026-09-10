@@ -3,6 +3,15 @@
   const list = document.getElementById("list");
   const empty = document.getElementById("empty");
   const pubnote = document.getElementById("pubnote");
+  let lectureEnabled = false;
+
+  function lectureBit(rec) {
+    const l = rec.lecture;
+    if (l && l.sent) return ` · <span class="tag">lecture → ${l.course}</span>`;
+    if (l && l.reason === "no class scheduled then") return "";
+    if (l && l.sent === false) return ` · <span class="tag warn">lecture push failed</span>`;
+    return "";
+  }
 
   function fmtDur(s) {
     s = Math.round(s || 0);
@@ -30,13 +39,16 @@
                aria-label="Title">
         <div class="rec-meta">
           ${fmtWhen(rec.created)} · ${fmtDur(rec.duration)} · ${fmtSize(rec.size)}
-          ${rec.published_to ? " · copied out" : ""}
+          ${rec.published_to ? " · copied out" : ""}${lectureBit(rec)}
         </div>
         ${rec.note ? `<div class="rec-note"></div>` : ""}
         <audio controls preload="none" src="/media/${rec.id}"></audio>
       </div>
       <div class="rec-actions">
         <a class="btn" href="/media/${rec.id}" download>Download</a>
+        ${lectureEnabled && rec.lecture && rec.lecture.sent === false
+          && rec.lecture.reason !== "no class scheduled then"
+          ? `<button class="btn" data-resend>Resend to notes</button>` : ""}
         <button class="btn danger" data-del>Delete</button>
       </div>`;
     if (rec.note) li.querySelector(".rec-note").textContent = rec.note;
@@ -69,6 +81,23 @@
       if (r.ok) li.remove();
       if (!list.children.length) empty.hidden = false;
     });
+
+    const resend = li.querySelector("[data-resend]");
+    if (resend) resend.addEventListener("click", async () => {
+      resend.disabled = true;
+      resend.textContent = "Sending…";
+      try {
+        const r = await fetch("/api/recordings/" + rec.id + "/lecture-push",
+                              { method: "POST" });
+        const j = await r.json();
+        if (j.ok) { load(); return; }
+        resend.textContent = "Failed — retry";
+        resend.disabled = false;
+      } catch (e) {
+        resend.textContent = "Failed — retry";
+        resend.disabled = false;
+      }
+    });
     return li;
   }
 
@@ -76,6 +105,7 @@
     const r = await fetch("/api/recordings");
     if (r.status === 401) { location.href = "/login"; return; }
     const j = await r.json();
+    lectureEnabled = !!j.lecture_enabled;
     list.innerHTML = "";
     if (!j.recordings.length) { empty.hidden = false; return; }
     empty.hidden = true;

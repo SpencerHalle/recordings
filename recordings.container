@@ -11,6 +11,21 @@ PublishPort=8099:8000
 Volume=%h/homelab/recordings/data:/data:z
 Volume=%h/homelab/recordings/secrets:/secrets:z
 Environment=TZ=America/Denver
+
+# ── Lecture pipeline hand-off ──────────────────────────────────────
+# A recording made during a scheduled class is also PUT into the Nextcloud
+# folder the lecture pipeline (testserver) polls, named YYYYMMDD_HHMMSS.<ext>.
+# Reaches Nextcloud directly on this network (no Cloudflare), so it needs the
+# public host name as a Host header. Password: secrets/nextcloud_app_password.
+Environment=REC_LECTURE_WEBDAV=http://nextcloud/remote.php/dav/files/Spencer
+Environment=REC_LECTURE_HOST=nextcloud.halleserver.cc
+Environment=REC_LECTURE_USER=Spencer
+Environment=REC_LECTURE_FOLDER=/LectureRecordings
+Environment=REC_LECTURE_SLACK_MIN=20
+# Class schedule — KEEP IN SYNC with the pipeline's config.yaml `schedule:`.
+# Omit to use the built-in default (astro Mon 16:45-19:15, na Tue/Thu 10:50-12:05).
+#Environment=REC_LECTURE_SCHEDULE=[{"course":"astro","days":["Mon"],"start":"16:45","end":"19:15"},{"course":"na","days":["Tue","Thu"],"start":"10:50","end":"12:05"}]
+
 # Optional: also drop a copy of every finished recording here.
 # Point it at a directory that is ALSO mounted into this container.
 #Environment=REC_PUBLISH_DIR=/publish
