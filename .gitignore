@@ -1,0 +1,4 @@
+secrets/
+data/recordings/
+__pycache__/
+*.pyc

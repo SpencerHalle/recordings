@@ -1,0 +1,31 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<meta name="theme-color" content="#111417">
+<title>{% block title %}Recordings{% endblock %}</title>
+<link rel="manifest" href="/manifest.webmanifest">
+<link rel="apple-touch-icon" href="/static/icon-192.png">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+<meta name="apple-mobile-web-app-title" content="Recordings">
+<link rel="stylesheet" href="/static/style.css">
+</head>
+<body>
+<header class="topbar">
+  <a class="brand" href="/">● Recordings</a>
+  <nav>
+    <a href="/" {% if request.url.path == '/' %}class="on"{% endif %}>Record</a>
+    <a href="/library" {% if request.url.path == '/library' %}class="on"{% endif %}>Library</a>
+  </nav>
+</header>
+<main>{% block content %}{% endblock %}</main>
+<script>
+  if ("serviceWorker" in navigator) {
+    navigator.serviceWorker.register("/sw.js").catch(() => {});
+  }
+</script>
+{% block script %}{% endblock %}
+</body>
+</html>

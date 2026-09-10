@@ -1,0 +1,24 @@
+[Unit]
+Description=Recordings — phone voice recorder that saves audio to bigbox
+After=network-online.target
+
+[Container]
+ContainerName=recordings
+Image=localhost/recordings-app:latest
+# join nextcloud.network so caddy can reach it as http://recordings:8000
+Network=nextcloud.network
+PublishPort=8099:8000
+Volume=%h/homelab/recordings/data:/data:z
+Volume=%h/homelab/recordings/secrets:/secrets:z
+Environment=TZ=America/Denver
+# Optional: also drop a copy of every finished recording here.
+# Point it at a directory that is ALSO mounted into this container.
+#Environment=REC_PUBLISH_DIR=/publish
+#Volume=/media/storage/audiobookshelf/podcasts/Voice Memos:/publish:z
+
+[Service]
+Restart=always
+TimeoutStartSec=90
+
+[Install]
+WantedBy=default.target

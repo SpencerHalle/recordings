@@ -1,0 +1,13 @@
+{% extends "base.html" %}
+{% block title %}Library{% endblock %}
+{% block content %}
+<section class="pane">
+  <div class="libhead">
+    <h1>Library</h1>
+    <span id="pubnote" class="pubnote"></span>
+  </div>
+  <p id="empty" class="hint" hidden>No recordings yet.</p>
+  <ul id="list" class="reclist"></ul>
+</section>
+{% endblock %}
+{% block script %}<script src="/static/library.js"></script>{% endblock %}

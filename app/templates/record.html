@@ -1,0 +1,33 @@
+{% extends "base.html" %}
+{% block title %}Record{% endblock %}
+{% block content %}
+<section class="pane recorder">
+  <div id="stage" class="stage idle">
+    <canvas id="meter" width="600" height="120" aria-hidden="true"></canvas>
+    <div id="timer" class="timer">0:00</div>
+  </div>
+
+  <div class="controls">
+    <button id="recBtn" class="recbtn" aria-label="Start recording"></button>
+    <button id="pauseBtn" class="ghost" hidden>Pause</button>
+  </div>
+  <p id="hint" class="hint">Tap to start recording</p>
+
+  <form id="saveForm" class="saveform" hidden>
+    <audio id="preview" controls preload="metadata"></audio>
+    <label>Title
+      <input id="title" name="title" type="text" placeholder="Untitled recording"
+             autocomplete="off">
+    </label>
+    <label>Note <span class="opt">(optional)</span>
+      <textarea id="note" name="note" rows="2"></textarea>
+    </label>
+    <div class="row">
+      <button type="button" id="discardBtn" class="ghost danger">Discard</button>
+      <button type="submit" id="saveBtn" class="primary">Save to server</button>
+    </div>
+    <p id="status" class="status" aria-live="polite"></p>
+  </form>
+</section>
+{% endblock %}
+{% block script %}<script src="/static/record.js"></script>{% endblock %}
