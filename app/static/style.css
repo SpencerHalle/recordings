@@ -80,6 +80,15 @@ button.danger, .btn.danger { color: #ff8a82; border-color: #4a2b2b; }
 .recbtn:disabled { opacity: .4; }
 .hint { color: var(--dim); font-size: 14px; min-height: 1.4em; margin: 14px 0 0; }
 
+.recover-banner {
+  text-align: left; background: #201a12; border: 1px solid #4a3b1c; border-radius: 12px;
+  padding: 14px 16px; margin-bottom: 18px;
+}
+.recover-banner p { margin: 0; font-size: 14px; color: var(--text); }
+.recover-banner .row { display: flex; gap: 10px; margin-top: 12px; }
+.recover-banner .row .primary { margin-top: 0; }
+.recover-banner .row .ghost { flex: 0 0 auto; }
+
 .saveform { margin-top: 22px; text-align: left; border-top: 1px solid var(--line); padding-top: 18px; }
 .saveform audio { width: 100%; margin-bottom: 8px; }
 .saveform .row { display: flex; gap: 10px; margin-top: 18px; }

@@ -1,4 +1,6 @@
-/* record.js — capture mic audio with MediaRecorder and upload it. */
+/* record.js — capture mic audio with MediaRecorder and upload it.
+   Chunks are flushed to IndexedDB as they arrive so a killed tab/browser
+   doesn't lose the lecture — an orphaned session is offered back on reload. */
 (() => {
   const stage = document.getElementById("stage");
   const meter = document.getElementById("meter");
@@ -13,6 +15,10 @@
   const discardBtn = document.getElementById("discardBtn");
   const saveBtn = document.getElementById("saveBtn");
   const statusEl = document.getElementById("status");
+  const recoverBanner = document.getElementById("recoverBanner");
+  const recoverInfo = document.getElementById("recoverInfo");
+  const recoverBtn = document.getElementById("recoverBtn");
+  const recoverDiscardBtn = document.getElementById("recoverDiscardBtn");
 
   const MIME_CHOICES = [
     "audio/mp4",
@@ -20,6 +26,10 @@
     "audio/webm",
     "audio/ogg;codecs=opus",
   ];
+
+  const DB_NAME = "rec-buffer";
+  const DB_VERSION = 1;
+  const TIMESLICE_MS = 1000; // flush a chunk at least this often
 
   let stream = null;
   let recorder = null;
@@ -32,6 +42,11 @@
   let audioCtx = null;
   let analyser = null;
   let rafId = 0;
+  let wakeLock = null;
+  let sessionId = null;
+  let seq = 0;
+  let db = null;
+  let recoveredSessionId = null;
 
   function pickMime() {
     if (!window.MediaRecorder || !MediaRecorder.isTypeSupported) return "";
@@ -88,6 +103,103 @@
     if (audioCtx) { audioCtx.close().catch(() => {}); audioCtx = null; }
   }
 
+  // ---------- screen wake lock (best-effort; auto-released when tab hides) ----------
+  async function acquireWakeLock() {
+    if (!("wakeLock" in navigator)) return;
+    try {
+      wakeLock = await navigator.wakeLock.request("screen");
+      wakeLock.addEventListener("release", () => { wakeLock = null; });
+    } catch (e) { wakeLock = null; }
+  }
+  function releaseWakeLock() {
+    if (wakeLock) { wakeLock.release().catch(() => {}); wakeLock = null; }
+  }
+  document.addEventListener("visibilitychange", () => {
+    if (document.visibilityState === "visible" && recorder &&
+        recorder.state === "recording" && !wakeLock) {
+      acquireWakeLock();
+    }
+  });
+
+  // ---------- IndexedDB: durable chunk buffer, survives a killed tab ----------
+  function openDb() {
+    return new Promise((resolve) => {
+      if (!window.indexedDB) { resolve(null); return; }
+      const req = indexedDB.open(DB_NAME, DB_VERSION);
+      req.onupgradeneeded = () => {
+        const d = req.result;
+        if (!d.objectStoreNames.contains("sessions")) {
+          d.createObjectStore("sessions", { keyPath: "id" });
+        }
+        if (!d.objectStoreNames.contains("chunks")) {
+          const store = d.createObjectStore("chunks", { keyPath: "key" });
+          store.createIndex("bySession", "sessionId");
+        }
+      };
+      req.onsuccess = () => resolve(req.result);
+      req.onerror = () => resolve(null);
+    });
+  }
+  async function ensureDb() {
+    if (db === null) db = await openDb();
+    return db;
+  }
+  async function putSession(session) {
+    const d = await ensureDb();
+    if (!d) return;
+    return new Promise((resolve) => {
+      const t = d.transaction(["sessions"], "readwrite");
+      t.objectStore("sessions").put(session);
+      t.oncomplete = () => resolve();
+      t.onerror = () => resolve();
+    });
+  }
+  async function putChunk(sid, i, data) {
+    const d = await ensureDb();
+    if (!d) return;
+    return new Promise((resolve) => {
+      const t = d.transaction(["chunks"], "readwrite");
+      t.objectStore("chunks").put({ key: sid + ":" + i, sessionId: sid, seq: i, data });
+      t.oncomplete = () => resolve();
+      t.onerror = () => resolve();
+    });
+  }
+  async function getAllSessions() {
+    const d = await ensureDb();
+    if (!d) return [];
+    return new Promise((resolve) => {
+      const t = d.transaction(["sessions"], "readonly");
+      const req = t.objectStore("sessions").getAll();
+      req.onsuccess = () => resolve(req.result || []);
+      req.onerror = () => resolve([]);
+    });
+  }
+  async function getChunksFor(sid) {
+    const d = await ensureDb();
+    if (!d) return [];
+    return new Promise((resolve) => {
+      const t = d.transaction(["chunks"], "readonly");
+      const idx = t.objectStore("chunks").index("bySession");
+      const req = idx.getAll(IDBKeyRange.only(sid));
+      req.onsuccess = () => resolve((req.result || []).sort((a, b) => a.seq - b.seq));
+      req.onerror = () => resolve([]);
+    });
+  }
+  async function clearSession(sid) {
+    const d = await ensureDb();
+    if (!d) return;
+    const chs = await getChunksFor(sid);
+    return new Promise((resolve) => {
+      const t = d.transaction(["sessions", "chunks"], "readwrite");
+      t.objectStore("sessions").delete(sid);
+      const cs = t.objectStore("chunks");
+      chs.forEach((c) => cs.delete(c.key));
+      t.oncomplete = () => resolve();
+      t.onerror = () => resolve();
+    });
+  }
+
+  // ---------- recording ----------
   async function begin() {
     statusEl.textContent = "";
     try {
@@ -111,11 +223,35 @@
     chunks = [];
     blob = null;
     elapsedBefore = 0;
+    seq = 0;
+    sessionId = (window.crypto && crypto.randomUUID) ? crypto.randomUUID()
+      : "s" + Date.now() + Math.random().toString(16).slice(2);
+    putSession({ id: sessionId, mime, startedAt: Date.now() });
 
-    recorder.ondataavailable = (ev) => { if (ev.data && ev.data.size) chunks.push(ev.data); };
+    recorder.ondataavailable = (ev) => {
+      if (ev.data && ev.data.size) {
+        chunks.push(ev.data);
+        putChunk(sessionId, seq++, ev.data);
+      }
+    };
     recorder.onstop = finalize;
-    recorder.start();
+    recorder.onerror = () => {
+      hint.textContent = "Recording error — stopped and saved what we have so far.";
+      if (recorder && recorder.state !== "inactive") end();
+    };
+    const track = stream.getAudioTracks()[0];
+    if (track) {
+      track.onended = () => {
+        hint.textContent = "Microphone disconnected — stopped and saved what we have so far.";
+        if (recorder && recorder.state !== "inactive") end();
+      };
+    }
+
+    // timeslice: flush chunks periodically instead of buffering the whole
+    // lecture in the recorder's internal (unrecoverable) memory until stop()
+    recorder.start(TIMESLICE_MS);
     startedAt = Date.now();
+    acquireWakeLock();
 
     try {
       audioCtx = new (window.AudioContext || window.webkitAudioContext)();
@@ -159,10 +295,11 @@
     if (recorder.state !== "paused") {
       elapsedBefore += (Date.now() - startedAt) / 1000;
     }
-    recorder.stop();
+    if (recorder.state !== "inactive") recorder.stop();
     stream.getTracks().forEach((t) => t.stop());
     stopTimer();
     stopMeter();
+    releaseWakeLock();
     stage.classList.remove("rec");
     stage.classList.add("idle");
     recBtn.classList.remove("recording");
@@ -189,6 +326,7 @@
   }
 
   function discard() {
+    if (sessionId) { clearSession(sessionId); sessionId = null; }
     blob = null;
     chunks = [];
     saveForm.hidden = true;
@@ -222,6 +360,7 @@
       if (lec && lec.sent) extra = " · sent to lecture notes (" + lec.course + ")";
       else if (j.meta && j.meta.published_to) extra = " (also copied out)";
       statusEl.textContent = "Saved ✓" + extra;
+      if (sessionId) { await clearSession(sessionId); sessionId = null; }
       setTimeout(() => { discard(); statusEl.textContent = ""; }, 1800);
     } catch (e) {
       statusEl.textContent =
@@ -230,6 +369,49 @@
       saveBtn.disabled = false;
       discardBtn.disabled = false;
     }
+  }
+
+  // ---------- recovery: an orphaned session means the page died mid-recording ----------
+  async function checkForRecovery() {
+    const sessions = await getAllSessions();
+    if (!sessions.length) return;
+    const s = sessions.sort((a, b) => b.startedAt - a.startedAt)[0];
+    const chs = await getChunksFor(s.id);
+    if (!chs.length) { await clearSession(s.id); checkForRecovery(); return; }
+
+    const when = new Date(s.startedAt);
+    const approxDur = fmt(chs.length * (TIMESLICE_MS / 1000));
+    recoverInfo.textContent =
+      "Found an interrupted recording from " +
+      when.toLocaleString(undefined, { month: "short", day: "numeric", hour: "numeric", minute: "2-digit" }) +
+      " (~" + approxDur + ")";
+    recoverBanner.hidden = false;
+    recBtn.disabled = true;
+
+    recoverBtn.onclick = () => {
+      mime = s.mime || "audio/webm";
+      blob = new Blob(chs.map((c) => c.data), { type: mime.split(";")[0] });
+      elapsedBefore = chs.length * (TIMESLICE_MS / 1000);
+      recoveredSessionId = s.id;
+      recoverBanner.hidden = true;
+      recBtn.disabled = false;
+      const url = URL.createObjectURL(blob);
+      preview.src = url;
+      titleEl.value = "";
+      titleEl.placeholder = "Recovered recording";
+      noteEl.value = "";
+      saveForm.hidden = false;
+      hint.textContent = "Recovered — review and save.";
+      timerEl.textContent = fmt(elapsedBefore);
+      sessionId = s.id; // save() will clear it from IndexedDB once uploaded
+      titleEl.focus();
+    };
+    recoverDiscardBtn.onclick = async () => {
+      await clearSession(s.id);
+      recoverBanner.hidden = true;
+      recBtn.disabled = false;
+      checkForRecovery(); // in case more than one was orphaned
+    };
   }
 
   recBtn.addEventListener("click", () => {
@@ -250,5 +432,7 @@
   if (!navigator.mediaDevices || !window.MediaRecorder) {
     hint.textContent = "This browser can't record audio. Try Safari or Chrome.";
     recBtn.disabled = true;
+  } else {
+    checkForRecovery();
   }
 })();
